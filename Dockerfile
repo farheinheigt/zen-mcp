@@ -6,6 +6,7 @@ COPY package.json package-lock.json* ./
 RUN npm install --omit=dev
 
 COPY server.mjs ./
+COPY src/ ./src/
 COPY launch-zen.sh ./
 COPY README.md ./
 

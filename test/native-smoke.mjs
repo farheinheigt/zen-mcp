@@ -1,0 +1,56 @@
+import assert from 'node:assert/strict';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+const profile=process.env.ZEN_TEST_PROFILE || process.cwd()+'/.test-runtime/profile';
+const transport=new StdioClientTransport({command:process.execPath,args:['server.mjs'],env:{...process.env,ZEN_NATIVE_PORT:'2839',ZEN_NATIVE_PROFILE:profile,ZEN_DEBUG_PORT:'9339'},stderr:'pipe'});
+transport.stderr?.on('data',()=>{});
+const client=new Client({name:'native-e2e',version:'1.0.0'});
+let checks=0;
+async function call(name,args={}) {const r=await client.callTool({name,arguments:args});if(r.isError)throw new Error(r.content[0].text);checks++;return JSON.parse(r.content[0].text);}
+async function refuse(name,args){const r=await client.callTool({name,arguments:args});assert.equal(r.isError,true,`${name} should refuse`);checks++;}
+try{
+ await client.connect(transport);
+ const catalog=await client.listTools();assert(catalog.tools.some(t=>t.name==='zen_space_merge'));assert(catalog.tools.some(t=>t.name==='zen_navigate'));
+ const original=await call('zen_native_snapshot');
+ const web=await client.callTool({name:'zen_list_pages',arguments:{}});assert(!web.isError,JSON.stringify(web));checks++;
+ const suffix=Date.now();
+ const a=await call('zen_space_create',{name:`Alpha ${suffix}`,icon:'🧪'});
+ const b=await call('zen_space_create',{name:`Beta ${suffix}`});
+ await refuse('zen_space_create',{name:`ALPHA ${suffix}`});
+ await refuse('zen_space_update',{spaceId:b.id,name:`Alpha ${suffix}`});
+ await call('zen_space_select',{spaceId:a.id});
+ await call('zen_space_update',{spaceId:b.id,name:`Destination ${suffix}`,icon:'📁'});
+ const c=await call('zen_space_create',{name:`Empty ${suffix}`});
+ await call('zen_space_delete',{spaceId:c.id});
+ const list=await call('zen_spaces_list');await call('zen_spaces_reorder',{spaceIds:list.map(s=>s.id).reverse()});
+ await refuse('zen_spaces_reorder',{spaceIds:[a.id]});
+ const t=[];for(let i=0;i<6;i++)t.push(await call('zen_tab_create',{spaceId:a.id,url:`https://example.invalid/zen-mcp-${suffix}/${i}`,pinned:i<4}));
+ const f=await call('zen_folder_create',{spaceId:a.id,name:'Parent'});
+ const sub=await call('zen_folder_create',{spaceId:a.id,parentId:f.id,name:'Child'});assert.equal(sub.parentId,f.id);
+ await call('zen_folder_rename',{folderId:sub.id,name:'Renamed child'});
+ await refuse('zen_folder_move',{folderId:f.id,parentId:sub.id});
+ await call('zen_tab_move',{tabId:t[0].id,folderId:sub.id});await call('zen_tab_move',{tabId:t[1].id,folderId:sub.id});
+ await refuse('zen_folder_remove',{folderId:sub.id});await refuse('zen_space_delete',{spaceId:a.id});
+ await refuse('zen_split_create',{tabIds:[t[0].id,t[4].id]});
+ const split=await call('zen_split_create',{tabIds:[t[0].id,t[1].id],layout:'vsep'});assert.equal(split.folderId,sub.id);
+ await call('zen_split_layout',{splitId:split.id,layout:'hsep'});
+ await call('zen_tab_move',{tabId:t[0].id,spaceId:b.id});
+ let snap=await call('zen_native_snapshot');assert.equal(snap.splits.find(s=>s.id===split.id).spaceId,b.id);assert.equal(snap.splits.find(s=>s.id===split.id).tabIds.length,2);
+ await call('zen_tab_pin',{tabId:t[0].id,pinned:false});assert.equal((await call('zen_splits_list')).find(s=>s.id===split.id).pinned,false);
+ await call('zen_tab_pin',{tabId:t[0].id,pinned:true});
+ await call('zen_tab_move',{tabId:t[0].id,spaceId:a.id,folderId:sub.id});
+ const normal=await call('zen_split_create',{tabIds:[t[4].id,t[5].id],layout:'grid'});
+ await call('zen_folder_move',{folderId:f.id,spaceId:b.id});
+ snap=await call('zen_native_snapshot');assert.equal(snap.folders.find(x=>x.id===sub.id).spaceId,b.id);assert.equal(snap.splits.find(x=>x.id===split.id).folderId,sub.id);
+ const beforeIds=snap.tabs.map(x=>x.id).sort();
+ assert((await call('zen_tabs_list',{spaceId:b.id})).some(x=>x.id===t[0].id));
+ assert((await call('zen_folders_list',{spaceId:b.id})).some(x=>x.id===f.id));
+ const concurrent=await Promise.all([client.callTool({name:'zen_spaces_list',arguments:{}}),client.callTool({name:'zen_list_pages',arguments:{}}),client.callTool({name:'zen_tabs_list',arguments:{spaceId:b.id}})]);
+ assert(concurrent.every(r=>!r.isError));checks+=3;
+ await call('zen_space_merge',{sourceId:a.id,targetId:b.id});
+ snap=await call('zen_native_snapshot');assert.deepEqual(snap.tabs.map(x=>x.id).sort(),beforeIds);assert(!snap.spaces.some(s=>s.id===a.id));assert.equal(snap.splits.find(x=>x.id===normal.id).spaceId,b.id);assert.equal(snap.folders.find(x=>x.id===sub.id).parentId,f.id);
+ await call('zen_split_separate',{splitId:normal.id});
+ await call('zen_folder_remove',{folderId:sub.id,keepTabs:true});
+ snap=await call('zen_native_snapshot');assert(!snap.folders.some(x=>x.id===sub.id));assert(snap.splits.some(s=>s.id===split.id));assert.deepEqual(snap.tabs.map(x=>x.id).sort(),beforeIds);
+ console.log(JSON.stringify({ok:true,checks,spaces:snap.spaces.length,tabs:snap.tabs.length,folders:snap.folders.length,splits:snap.splits.length,retainedDestination:b.id,baselineSpaces:original.spaces.length}));
+}catch(error){console.error(error.stack);process.exitCode=1;}finally{await client.close();}

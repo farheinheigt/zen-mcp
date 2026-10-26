@@ -14,6 +14,8 @@ import {
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import WebSocket from 'ws';
+import { NATIVE_TOOLS, NativeTools } from './src/native-tools.mjs';
+const native = new NativeTools();
 
 const PORT = parseInt(process.env.ZEN_DEBUG_PORT || '9222');
 const WS_URL = `ws://127.0.0.1:${PORT}/session`;
@@ -584,6 +586,15 @@ const TOOLS = [
 // ─── Tool Handlers ──────────────────────────────────────────────────
 
 async function handleTool(name, args) {
+  if (NATIVE_TOOLS.some(tool => tool.name === name)) {
+    // Gecko permits only one WebDriver session across BiDi and Marionette.
+    await bidi.disconnect();
+    bidi.currentContext = null;
+    return text(JSON.stringify(await native.call(name, args)));
+  }
+  await native.disconnect();
+  bidi._intentionalDisconnect = false;
+
   // zen_reconnect handles its own connection lifecycle
   if (name !== 'zen_reconnect') {
     await bidi.ensureConnected();
@@ -1041,25 +1052,32 @@ function text(str) {
   return { content: [{ type: 'text', text: str }] };
 }
 
+let toolQueue = Promise.resolve();
+function dispatchTool(name, args) {
+  const task = toolQueue.then(() => handleTool(name, args));
+  toolQueue = task.catch(() => {});
+  return task;
+}
+
 // ─── MCP Server Setup ───────────────────────────────────────────────
 
 const server = new Server(
-  { name: 'zen-browser', version: '1.2.3' },
+  { name: 'zen-browser', version: '1.3.0-local.1' },
   { capabilities: { tools: {} } }
 );
 
-server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
+server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [...TOOLS, ...NATIVE_TOOLS] }));
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
   try {
-    return await handleTool(name, args || {});
+    return await dispatchTool(name, args || {});
   } catch (error) {
     log(`Error in ${name}:`, error.message);
     return {
       content: [{
         type: 'text',
-        text: `Error: ${error.message}\n\nMake sure Zen is running with:\n  /Applications/Zen.app/Contents/MacOS/zen --remote-debugging-port ${PORT}`,
+        text: NATIVE_TOOLS.some(tool => tool.name === name) ? `Native error: ${error.message}` : `Error: ${error.message}\n\nMake sure Zen is running with:\n  /Applications/Zen.app/Contents/MacOS/zen --remote-debugging-port ${PORT}`,
       }],
       isError: true,
     };
@@ -1070,6 +1088,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 async function gracefulShutdown(signal) {
   log(`Received ${signal}, cleaning up...`);
   try {
+    await native.disconnect();
     await bidi.disconnect();
   } catch (e) {
     log('Cleanup error (non-fatal):', e.message);

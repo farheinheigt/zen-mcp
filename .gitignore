@@ -4,3 +4,5 @@ test-bidi.mjs
 test-e2e.mjs
 .mcpregistry_*_token
 launch-posts.md
+
+.test-runtime/

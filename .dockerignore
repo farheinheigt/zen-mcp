@@ -6,3 +6,6 @@ npm-debug.log
 test-*.mjs
 launch-posts.md
 *.tgz
+
+.test-runtime
+test
