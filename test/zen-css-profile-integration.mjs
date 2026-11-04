@@ -23,7 +23,7 @@ const styleFile = `${fixtureDomain}.css`;
 const settingsKey = `transparentZenSettings.${fixtureDomain}`;
 const featureCSS = {
   transparency: '#zen-css-fixture { background-color: rgb(255, 0, 0) !important; }',
-  'fixture cosmetic': '.zen-css-fixture { border: 7px solid rgb(0, 128, 0) !important; }',
+  'fixture cosmetic': '.zen-css-fixture { border: 7px solid rgb(0, 128, 0) !important; }\n.article-content { background-color: rgb(12, 34, 56) !important; }',
 };
 const fixture = { website: { [styleFile]: featureCSS }, mapping: {} };
 const seededStyles = {
@@ -246,9 +246,26 @@ async function readChangeProbe(target) {
   return JSON.parse(await backgroundValue(target, `JSON.stringify(globalThis.__zenCssProbe||[])`));
 }
 
-async function openFixtureTabs(target, fixtureUrl, sentinelUrl) {
-  const urls = [fixtureUrl, sentinelUrl];
+async function openFixtureTabs(target, ...urls) {
   const raw = await backgroundValue(target, `Promise.all(${JSON.stringify(urls)}.map(async url=>{const tab=await browser.tabs.create({url,active:false});return {id:tab.id,url}})).then(JSON.stringify)`);
+  return JSON.parse(raw);
+}
+
+async function discardFixtureTab(target, tabId) {
+  const deadline = Date.now() + 10000;
+  let current;
+  do {
+    current = JSON.parse(await backgroundValue(target, `browser.tabs.get(${JSON.stringify(tabId)}).then(tab=>JSON.stringify({discarded:tab.discarded===true,status:tab.status,active:tab.active===true}))`));
+    if (current.discarded || current.status === 'complete') break;
+    await new Promise(resolve => setTimeout(resolve, 100));
+  } while (Date.now() < deadline);
+  assert.equal(current?.status, 'complete', 'the secondary fixture tab should finish loading before it is discarded');
+  const raw = await backgroundValue(target, `(async()=>{await browser.tabs.discard(${JSON.stringify(tabId)});const tab=await browser.tabs.get(${JSON.stringify(tabId)});return JSON.stringify({discarded:tab.discarded===true,status:tab.status,active:tab.active===true})})()`);
+  return JSON.parse(raw);
+}
+
+async function readFixtureTabState(target, tabId) {
+  const raw = await backgroundValue(target, `browser.tabs.get(${JSON.stringify(tabId)}).then(tab=>JSON.stringify({discarded:tab.discarded===true,status:tab.status,active:tab.active===true}))`);
   return JSON.parse(raw);
 }
 
@@ -277,7 +294,7 @@ async function readPageResult(tabUrl) {
     const originalActor = rdp.consoleActor;
     rdp.consoleActor = consoleActor;
     try {
-      const raw = await rdp.asyncValue(`JSON.stringify((()=>{const el=document.getElementById('zen-css-fixture');const sheet=document.getElementById('zeninternet-styles');return {hasSheet:!!sheet,hasFixtureRule:!!sheet?.textContent.includes('.zen-css-fixture'),hasTransparencyRule:!!sheet?.textContent.includes('#zen-css-fixture'),border:getComputedStyle(el).borderTopWidth,background:getComputedStyle(el).backgroundColor}})())`);
+      const raw = await rdp.asyncValue(`JSON.stringify((()=>{const el=document.getElementById('zen-css-fixture');const article=document.querySelector('.article-content');const sheet=document.getElementById('zeninternet-styles');return {hasSheet:!!sheet,hasFixtureRule:!!sheet?.textContent.includes('.zen-css-fixture'),hasTransparencyRule:!!sheet?.textContent.includes('#zen-css-fixture'),hasArticleRule:!!sheet?.textContent.includes('.article-content'),border:getComputedStyle(el).borderTopWidth,background:getComputedStyle(el).backgroundColor,articleBackground:article?getComputedStyle(article).backgroundColor:null}})())`);
       return JSON.parse(raw);
     } finally {
       rdp.consoleActor = originalActor;
@@ -327,7 +344,7 @@ try {
   const httpPort = await freePort();
   fixtureServer = createServer((_request, response) => {
     response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-    response.end('<!doctype html><meta charset="utf-8"><title>Zen CSS isolated fixture</title><div id="zen-css-fixture" class="zen-css-fixture">Fixture</div>');
+    response.end('<!doctype html><meta charset="utf-8"><title>Zen CSS isolated fixture</title><div id="zen-css-fixture" class="zen-css-fixture">Fixture</div><article class="article-content">Synthetic article style evidence</article>');
   });
   await new Promise((resolve, reject) => {
     fixtureServer.once('error', reject);
@@ -352,9 +369,12 @@ try {
   assert.equal(target.targetType, 'frame');
   assert.match(target.url, /_generated_background_page\.html$/);
   await installFixtureSeed(target);
-  const tabs = await openFixtureTabs(target, fixtureUrl, sentinelUrl);
-  assert.equal(tabs.length, 2);
+  const discardedFixtureUrl = `${fixtureUrl}/discarded`;
+  const tabs = await openFixtureTabs(target, fixtureUrl, discardedFixtureUrl, sentinelUrl);
+  assert.equal(tabs.length, 3);
   console.log(JSON.stringify({ tabsBeforeImport: await waitForFixtureTabs() }));
+  const discardState = await discardFixtureTab(target, tabs[1].id);
+  assert.deepEqual(discardState, { discarded: true, status: 'complete', active: false }, 'the secondary fixture tab should be discarded without activation');
   await addChangeProbe(target);
   const before = await readFixtureStorage();
   assert.deepEqual(before.styles, seededStyles);
@@ -376,16 +396,30 @@ try {
   assert.equal(imported.stored, true);
   assert.equal(imported.readbackVerified, true);
   assert.ok(imported.backupPath.startsWith(path.join(testDir, 'state')));
-  assert.equal(imported.pageApplication.allTabsVerified, true, `the imported rules should be verified in the matching local tab: ${JSON.stringify(imported.pageApplication)}`);
-  assert.equal(imported.pageApplication.matchedTabs, 1, 'only the CSS domain tab should be refreshed');
+  assert.equal(imported.pageApplication.attemptedLoadedTabs, 1, 'import should refresh only the loaded fixture tab');
+  assert.equal(imported.pageApplication.skippedDiscardedTabs, 1, 'import should skip the discarded fixture tab');
+  assert.equal(imported.pageApplication.refreshedTabs, 1, 'the compatibility refresh count should reflect attempted loaded tabs');
+  assert.equal(imported.pageApplication.pageEvidence.stylesheetMatches, 1);
+  assert.deepEqual(imported.pageApplication.pageEvidence.articleContentBackgrounds, [{ backgroundColor: 'rgb(12, 34, 56)', hasBackgroundImage: false }], 'import should report computed style evidence from the loaded article fixture only');
   const verifyAfter = await callMcp('zen_css_profile_verify', { profilePath: fixturePath, domain: fixtureDomain });
   assert.equal(verifyAfter.matchesStoredProfile, true, 'read-only verify should match the stored fixture profile');
-  assert.equal(verifyAfter.pageApplication.allTabsVerified, true, 'read-only verify should report the matching page CSS');
+  assert.equal(verifyAfter.pageApplication.matchedTabs, 2, 'verification should count both domain tabs');
+  assert.equal(verifyAfter.pageApplication.loadedTabs, 1);
+  assert.equal(verifyAfter.pageApplication.discardedTabs, 1);
+  assert.equal(verifyAfter.pageApplication.inspectableTabs, 1);
+  assert.equal(verifyAfter.pageApplication.rdpCandidates, 1);
+  assert.equal(verifyAfter.pageApplication.verifiedTabs, 1, 'read-only verify should inspect the loaded fixture page');
+  assert.equal(verifyAfter.pageApplication.verificationState, 'partial');
+  assert.equal(verifyAfter.pageApplication.allTabsVerified, false, 'discarded pages must prevent an all-tabs verified claim');
+  assert.deepEqual(verifyAfter.pageApplication.pageEvidence, {
+    stylesheetMatches: 1,
+    articleContentBackgrounds: [{ backgroundColor: 'rgb(12, 34, 56)', hasBackgroundImage: false }],
+  }, 'read-only evidence should include the loaded article fixture and no sample from the discarded tab');
   await closeMcp();
   await connectDirect(port);
   const pageAfterApply = await readPageResult(tabs[0].url);
-  const sentinelAfterApply = await readPageResult(tabs[1].url);
-  console.log(JSON.stringify({ importPageApplication: imported.pageApplication, pageAfterApply, sentinelAfterApply }));
+  const sentinelAfterApply = await readPageResult(tabs[2].url);
+  console.log(JSON.stringify({ importPageApplication: imported.pageApplication, verifyPageApplication: verifyAfter.pageApplication, pageAfterApply, sentinelAfterApply }));
 
   const afterApply = await readFixtureStorage();
   assert.deepEqual(afterApply.styles.website[styleFile], {
@@ -402,8 +436,12 @@ try {
   assert.equal(pageAfterApply.hasFixtureRule, true, 'enabled absent feature should be applied to the fixture page');
   assert.equal(pageAfterApply.border, '7px', 'fixture CSS should affect the local page');
   assert.equal(pageAfterApply.background, 'rgba(0, 0, 0, 0)', 'disabled transparency feature should stay unapplied');
+  assert.equal(pageAfterApply.hasArticleRule, true, 'the loaded fixture DOM should contain the article style rule');
+  assert.equal(pageAfterApply.articleBackground, 'rgb(12, 34, 56)', 'the loaded article element should report the expected computed background');
   assert.equal(pageAfterApply.hasTransparencyRule, false, 'false switch should exclude the disabled CSS rule');
   assert.equal(sentinelAfterApply.hasSheet, false, 'non-matching local tab should remain unchanged');
+  const discardedStateAfterApply = await withFreshBackgroundTarget(target => readFixtureTabState(target, tabs[1].id));
+  assert.deepEqual(discardedStateAfterApply, discardState, 'the discarded page must remain unloaded after import and verification');
   const applyEvents = await withFreshBackgroundTarget(readChangeProbe);
   assert.ok(applyEvents.some(event => event.area === 'local' && event.keys.includes('styles')), 'browser.storage.onChanged should receive the styles update');
 
@@ -442,7 +480,8 @@ try {
   const restored = await callMcp('zen_css_profile_restore', { backupPath: imported.backupPath, domain: fixtureDomain });
   assert.equal(restored.restored, true);
   assert.equal(restored.readbackVerified, true);
-  assert.equal(restored.pageApplication.allTabsVerified, true, 'restored CSS should be applied to the fixture tab');
+  assert.equal(restored.pageApplication.verifiedTabs, 1, 'restored CSS should be verified on the loaded fixture tab');
+  assert.equal(restored.pageApplication.verificationState, 'partial', 'the discarded fixture tab remains outside page inspection');
   const verifyRestored = await callMcp('zen_css_profile_verify', { profilePath: fixturePath, domain: fixtureDomain });
   assert.equal(verifyRestored.matchesStoredProfile, false, 'verify should be read-only and report that imported CSS was restored');
   await closeMcp();
@@ -457,13 +496,15 @@ try {
   assert.deepEqual(afterRestore[settingsKey], { transparency: true, keepSiteMarker: 'changed during fixture' });
   const pageAfterRestore = await readPageResult(tabs[0].url);
   assert.equal(pageAfterRestore.hasFixtureRule, false, 'restore should remove the imported fixture CSS');
-  const sentinelAfterRestore = await readPageResult(tabs[1].url);
+  const sentinelAfterRestore = await readPageResult(tabs[2].url);
   assert.equal(sentinelAfterRestore.hasSheet, false, 'targeted restore should leave the sentinel tab unchanged');
+  const discardedStateAfterRestore = await withFreshBackgroundTarget(target => readFixtureTabState(target, tabs[1].id));
+  assert.deepEqual(discardedStateAfterRestore, discardState, 'restore must not activate or load the discarded fixture tab');
 
   const probeEvents = await withFreshBackgroundTarget(readChangeProbe);
   assert.ok(probeEvents.some(event => event.area === 'local' && event.keys.includes('styles')), 'restore notification should reach browser.storage.onChanged');
   await withFreshBackgroundTarget(takeChangeProbe);
-  console.log(JSON.stringify({ ok: true, fixtureDomain, checks: 25, mcpTools: cssToolNames, officialXpiHash: sourceHash, isolatedProfile: true, notificationVerified: true, backupRestored: true }));
+  console.log(JSON.stringify({ ok: true, fixtureDomain, checks: 76, mcpTools: cssToolNames, officialXpiHash: sourceHash, isolatedProfile: true, notificationVerified: true, backupRestored: true }));
 } catch (error) {
   console.error(error.stack || error);
   process.exitCode = 1;

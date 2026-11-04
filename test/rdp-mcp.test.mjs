@@ -83,3 +83,34 @@ test('RDP one-way requests write without waiting for an acknowledgement', async 
  assert.equal(Number(packet.subarray(0, colon).toString()), packet.length - colon - 1);
  assert.deepEqual(JSON.parse(packet.subarray(colon + 1).toString()), { to: 'watcher1', type: 'unwatchTargets', targetType: 'frame' });
 });
+
+test('CSS verification distinguishes discarded domain tabs from no matching tabs', async () => {
+ const client = Object.create(RdpClient.prototype);
+ assert.deepEqual(client._cssVerificationSummary({ matchedTabs: 17, discardedTabs: 17, loadedTabs: 0 }, 0, 0), {
+  matchedTabs: 17, discardedTabs: 17, loadedTabs: 0, inspectableTabs: 0, verifiedTabs: 0,
+  allTabsVerified: false, verificationState: 'no_loaded_tabs',
+ });
+ assert.equal(client._cssVerificationSummary({ matchedTabs: 0, discardedTabs: 0, loadedTabs: 0 }, 0, 0).verificationState, 'no_matching_tabs');
+ assert.equal(client._cssVerificationSummary({ matchedTabs: 3, discardedTabs: 1, loadedTabs: 2 }, 2, 2).verificationState, 'partial');
+ assert.equal(client._cssVerificationSummary({ matchedTabs: 2, discardedTabs: 0, loadedTabs: 2 }, 2, 2).verificationState, 'verified');
+ assert.equal(client._cssVerificationSummary({ matchedTabs: 2, discardedTabs: 0, loadedTabs: 2 }, 1, 1).allTabsVerified, false);
+});
+
+test('CSS domain tab summary uses a domain-filtered background query and returns counts only', async () => {
+ const client = Object.create(RdpClient.prototype);
+ client._cssBackgroundActor = async () => ({ actor: 'background-console', watcherId: 'background-watcher' });
+ let expression;
+ client.asyncValue = async (value, actor) => {
+  expression = value;
+  assert.equal(actor, 'background-console');
+  return JSON.stringify({ matchingTabs: 17, discardedTabs: 17, loadedTabs: 0 });
+ };
+ let unwatched;
+ client.sendOneWay = async (...args) => { unwatched = args; };
+ client._discardWatcherTargetEvents = () => {};
+ assert.deepEqual(await client._cssDomainTabState({ domain: 'korben.info' }), { matchedTabs: 17, discardedTabs: 17, loadedTabs: 0 });
+ assert.match(expression, /browser\.tabs\.query\(\{url:/);
+ assert.match(expression, /korben\.info/);
+ assert.doesNotMatch(expression, /tabs\.map\(tab=>tab\.url/);
+ assert.deepEqual(unwatched, ['background-watcher', 'unwatchTargets', { targetType: 'frame' }]);
+});

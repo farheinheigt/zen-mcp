@@ -322,8 +322,9 @@ export class RdpClient {
       const enabled=Object.entries(entry).filter(([name])=>flags[name]!==false).map(([,value])=>value);
       const css=enabled.join("\\n")+(enabled.length?"\\n":"");if(enabled.length)cssCache.set(domain,css);else cssCache.delete(domain);stylingStateCache.delete("styling:"+domain);
       const tabs=await browser.tabs.query({url:["*://"+domain+"/*","*://*."+domain+"/*"]});
-      for(const tab of tabs)await applyCSSToTab(tab);
-      return JSON.stringify({refreshedTabs:tabs.length});
+      const inspectable=tabs.filter(tab=>tab.discarded!==true);
+      for(const tab of inspectable)await applyCSSToTab(tab);
+      return JSON.stringify({refreshedTabs:inspectable.length,attemptedLoadedTabs:inspectable.length,skippedDiscardedTabs:tabs.length-inspectable.length});
     })()`;
     let refresh;
     try {
@@ -337,6 +338,7 @@ export class RdpClient {
   }
   async _checkCssDomain(profile) {
     const expected = (await this._cssStorage('effectiveCss', { domain: profile.domain, styleFile: profile.styleFile })).css;
+    const domainTabs = await this._cssDomainTabState(profile);
     const findCandidates = async () => {
       const listed = await this.call('root', 'listTabs');
       return (listed.tabs || []).filter(tab => {
@@ -347,11 +349,13 @@ export class RdpClient {
       });
     };
     let candidates = await findCandidates();
-    for (let attempt = 0; candidates.length === 0 && attempt < 8; attempt++) {
+    for (let attempt = 0; candidates.length === 0 && domainTabs.loadedTabs > 0 && attempt < 8; attempt++) {
       await new Promise(resolve => setTimeout(resolve, 250));
       candidates = await findCandidates();
     }
     let verifiedTabs = 0;
+    let inspectableTabs = 0;
+    const pageEvidence = { stylesheetMatches: 0, articleContentBackgrounds: [] };
     const failures = { watcherUnavailable: 0, targetUnavailable: 0, consoleUnavailable: 0, inspectionFailed: 0, stylesheetMismatch: 0 };
     for (const tab of candidates) {
       if (!tab.actor) { failures.watcherUnavailable++; continue; }
@@ -374,10 +378,14 @@ export class RdpClient {
         if (!form) { failures.targetUnavailable++; continue; }
         const target = form.target || form.targetForm || form;
         if (typeof target.consoleActor !== 'string') { failures.consoleUnavailable++; continue; }
-        const expression = `(()=>{const domain=${JSON.stringify(profile.domain)};const host=location.hostname;const inScope=host===domain||host.endsWith("."+domain);const el=document.getElementById("zeninternet-styles");return inScope&&${expected ? `Boolean(el)&&el.textContent===${JSON.stringify(expected)}` : '!el'}})()`;
+        inspectableTabs++;
+        const expression = `(()=>{const domain=${JSON.stringify(profile.domain)};const host=location.hostname;const inScope=host===domain||host.endsWith("."+domain);const el=document.getElementById("zeninternet-styles");const stylesheetMatches=inScope&&${expected ? `Boolean(el)&&el.textContent===${JSON.stringify(expected)}` : '!el'};const article=document.querySelector(".article-content");let articleContent=null;if(article){const style=getComputedStyle(article);articleContent={backgroundColor:style.backgroundColor,hasBackgroundImage:style.backgroundImage!=="none"};}return JSON.stringify({stylesheetMatches,articleContent})})()`;
         try {
-          if (await this.evaluate(expression, target.consoleActor) === true) verifiedTabs++;
+          const rawEvidence = await this.evaluate(expression, target.consoleActor);
+          const result = typeof rawEvidence === 'string' ? JSON.parse(rawEvidence) : rawEvidence;
+          if (result?.stylesheetMatches === true) { verifiedTabs++; pageEvidence.stylesheetMatches++; }
           else failures.stylesheetMismatch++;
+          if (result?.articleContent && typeof result.articleContent.backgroundColor === 'string' && typeof result.articleContent.hasBackgroundImage === 'boolean') pageEvidence.articleContentBackgrounds.push(result.articleContent);
         } catch { failures.inspectionFailed++; }
       } finally {
         if (watcherId) {
@@ -386,7 +394,29 @@ export class RdpClient {
         }
       }
     }
-    return { matchedTabs: candidates.length, verifiedTabs, allTabsVerified: candidates.length > 0 && verifiedTabs === candidates.length, inspectionFailures: failures };
+    return { ...this._cssVerificationSummary(domainTabs, inspectableTabs, verifiedTabs), rdpCandidates: candidates.length, pageEvidence, inspectionFailures: failures };
+  }
+  _cssVerificationSummary(domainTabs, inspectableTabs, verifiedTabs) {
+    const allTabsVerified = domainTabs.matchedTabs > 0 && domainTabs.discardedTabs === 0 && inspectableTabs === domainTabs.loadedTabs && verifiedTabs === domainTabs.loadedTabs;
+    const verificationState = domainTabs.matchedTabs === 0 ? 'no_matching_tabs'
+      : domainTabs.loadedTabs === 0 ? 'no_loaded_tabs'
+      : allTabsVerified ? 'verified'
+      : 'partial';
+    return { ...domainTabs, inspectableTabs, verifiedTabs, allTabsVerified, verificationState };
+  }
+  async _cssDomainTabState(profile) {
+    const target = await this._cssBackgroundActor();
+    const domain = JSON.stringify(profile.domain);
+    const expression = `(async()=>{const domain=${domain};const tabs=await browser.tabs.query({url:["*://"+domain+"/*","*://*."+domain+"/*"]});return JSON.stringify({matchingTabs:tabs.length,discardedTabs:tabs.filter(tab=>tab.discarded===true).length,loadedTabs:tabs.filter(tab=>tab.discarded!==true).length})})()`;
+    try {
+      const raw = await this.asyncValue(expression, target.actor);
+      const state = typeof raw === 'string' ? JSON.parse(raw) : raw;
+      if (!Number.isInteger(state?.matchingTabs) || !Number.isInteger(state?.discardedTabs) || !Number.isInteger(state?.loadedTabs)) throw new Error('Invalid CSS domain tab summary');
+      return { matchedTabs: state.matchingTabs, discardedTabs: state.discardedTabs, loadedTabs: state.loadedTabs };
+    } finally {
+      await this.sendOneWay(target.watcherId, 'unwatchTargets', { targetType: 'frame' }).catch(() => {});
+      this._discardWatcherTargetEvents(target.watcherId);
+    }
   }
   async _assertCssAddon() {
     const addon = await this.getAddon(ZEN_INTERNET_CSS_ADDON.id, undefined, ZEN_INTERNET_CSS_ADDON.version);
@@ -423,10 +453,10 @@ export class RdpClient {
     const addon = await this._assertCssAddon();
     const result = await this._cssStorage('snapshot', profile);
     const mismatches = Object.entries(profile.features).filter(([name, css]) => result.target.styles[name]?.exists !== true || result.target.styles[name]?.value !== css).map(([name]) => name);
-    let pageApplication = { checked: false, matchedTabs: 0, verifiedTabs: 0, allTabsVerified: false, inspectionFailures: {} };
+    let pageApplication = { checked: false, matchedTabs: null, discardedTabs: null, loadedTabs: null, rdpCandidates: null, inspectableTabs: 0, verifiedTabs: 0, allTabsVerified: false, verificationState: 'not_checked', inspectionFailures: {} };
     if (mismatches.length === 0) {
       try { pageApplication = { checked: true, ...(await this._checkCssDomain(profile)) }; }
-      catch { pageApplication = { checked: false, matchedTabs: 0, verifiedTabs: 0, allTabsVerified: false, inspectionFailures: { pageTargetDiscoveryFailed: 1 } }; }
+      catch { pageApplication = { checked: false, matchedTabs: null, discardedTabs: null, loadedTabs: null, rdpCandidates: null, inspectableTabs: 0, verifiedTabs: 0, allTabsVerified: false, verificationState: 'unavailable', inspectionFailures: { pageTargetDiscoveryFailed: 1 } }; }
     }
     return { domain, features: Object.keys(profile.features), matchesStoredProfile: mismatches.length === 0, mismatchedFeatures: mismatches, addon: { id: addon.id, version: addon.version, active: addon.active, permanent: addon.permanent }, storageReadOnly: true, pageApplication };
   }
