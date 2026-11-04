@@ -12,7 +12,8 @@
     "test": "node --test test/*.test.mjs",
     "launch-zen": "./launch-zen.sh",
     "test:integration": "node test/integration.mjs",
-    "test:rdp-integration": "node test/rdp-integration.mjs"
+    "test:rdp-integration": "node test/rdp-integration.mjs",
+    "test:css-profile-integration": "node test/zen-css-profile-integration.mjs"
   },
   "keywords": [
     "mcp",

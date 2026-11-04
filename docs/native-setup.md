@@ -1,6 +1,6 @@
 # Native Zen setup
 
-This checkout keeps the original 20 web tools, adds 21 native organization tools, and adds three guarded XPI-management tools.
+This checkout keeps the original 20 web tools, adds 21 native organization tools, three guarded XPI-management tools, and four scoped Zen Internet CSS-profile tools. See the [CSS profile guide](zen-internet-css.md) for their contracts and examples.
 It is a local development fork (`1.3.0-local.1`), not an official Zen or upstream
 release. It has not been registered in any personal MCP configuration.
 

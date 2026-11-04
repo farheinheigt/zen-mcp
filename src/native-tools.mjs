@@ -35,6 +35,10 @@ export const RDP_TOOLS = [
   rdpTool('zen_extension_status', 'Read installed add-on ID, version, SHA-256, active and permanent state in the explicitly authorized RDP profile.', { id }, ['id']),
   rdpTool('zen_extension_install', 'Ask Gecko to install/update an XPI on the explicitly authorized RDP profile, then verify ID, version, SHA-256, active and permanent state. Unsigned XPI installation depends on that profile’s existing policy.', { path: { type: 'string', minLength: 1, maxLength: 4096 }, id, version: { type: 'string', minLength: 1, maxLength: 128 }, sha256: { type: 'string', pattern: '^[a-fA-F0-9]{64}$' }, force: bool }, ['path', 'id', 'version', 'sha256']),
   rdpTool('zen_extension_verify', 'Verify an installed add-on ID, version, installed XPI SHA-256, active and permanent state in the explicitly authorized RDP profile.', { id, version: { type: 'string', minLength: 1, maxLength: 128 }, sha256: { type: 'string', pattern: '^[a-fA-F0-9]{64}$' } }, ['id', 'version', 'sha256']),
+  rdpTool('zen_css_profile_status', 'Read stored CSS feature names for one domain from the verified Zen Internet catalog add-on.', { domain: { type: 'string', minLength: 1, maxLength: 253 } }, ['domain']),
+  rdpTool('zen_css_profile_verify', 'Compare one local single-domain CSS profile with catalog storage without mutating anything.', { profilePath: { type: 'string', minLength: 1, maxLength: 4096 }, domain: { type: 'string', minLength: 1, maxLength: 253 } }, ['profilePath', 'domain']),
+  rdpTool('zen_css_profile_import', 'Import one local single-domain CSS profile into the verified CSS catalog add-on, creating a private restorable backup under XDG_STATE_HOME.', { profilePath: { type: 'string', minLength: 1, maxLength: 4096 }, domain: { type: 'string', minLength: 1, maxLength: 253 } }, ['profilePath', 'domain']),
+  rdpTool('zen_css_profile_restore', 'Restore targeted CSS features from a local backup, refusing if those feature values changed since import.', { backupPath: { type: 'string', minLength: 1, maxLength: 4096 }, domain: { type: 'string', minLength: 1, maxLength: 253 } }, ['backupPath', 'domain']),
 ];
 export function validateNativeArgs(name, args) {
   const schema = NATIVE_TOOLS.find(t => t.name === name)?.inputSchema;
@@ -85,6 +89,10 @@ export class NativeTools {
       if (!result) throw new Error('Add-on is not installed');
       return result;
     }
+    if (name === 'zen_css_profile_status') return this.rdp.cssProfileStatus(args);
+    if (name === 'zen_css_profile_verify') return this.rdp.verifyZenCssProfile(args);
+    if (name === 'zen_css_profile_import') return this.rdp.applyZenCssProfile(args);
+    if (name === 'zen_css_profile_restore') return this.rdp.restoreZenCssProfile(args);
     return this.rdp.installXpi(args);
   }
   async call(name, args) {
