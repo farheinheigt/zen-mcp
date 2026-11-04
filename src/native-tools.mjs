@@ -1,5 +1,6 @@
 import { MarionetteClient } from './marionette.mjs';
 import { nativeDispatch } from './native-dispatch.mjs';
+import { RdpClient } from './rdp.mjs';
 const id = { type: 'string', minLength: 1, maxLength: 250 };
 const label = { type: 'string', minLength: 1, maxLength: 200 };
 const bool = { type: 'boolean' };
@@ -29,6 +30,12 @@ export const NATIVE_TOOLS = [
   tool('zen_split_layout', 'Set Split layout: vsep side by side, hsep stacked, grid columns. Keeps all members.', { splitId: id, layout }, ['splitId', 'layout']),
   tool('zen_split_separate', 'Separate an entire Split into its original tabs without closing pages.', { splitId: id }, ['splitId']),
 ];
+const rdpTool = (name, description, properties, required) => tool(name, description, properties, required);
+export const RDP_TOOLS = [
+  rdpTool('zen_extension_status', 'Read installed add-on ID, version, SHA-256, active and permanent state in the explicitly authorized RDP profile.', { id }, ['id']),
+  rdpTool('zen_extension_install', 'Ask Gecko to install/update an XPI on the explicitly authorized RDP profile, then verify ID, version, SHA-256, active and permanent state. Unsigned XPI installation depends on that profile’s existing policy.', { path: { type: 'string', minLength: 1, maxLength: 4096 }, id, version: { type: 'string', minLength: 1, maxLength: 128 }, sha256: { type: 'string', pattern: '^[a-fA-F0-9]{64}$' }, force: bool }, ['path', 'id', 'version', 'sha256']),
+  rdpTool('zen_extension_verify', 'Verify an installed add-on ID, version, installed XPI SHA-256, active and permanent state in the explicitly authorized RDP profile.', { id, version: { type: 'string', minLength: 1, maxLength: 128 }, sha256: { type: 'string', pattern: '^[a-fA-F0-9]{64}$' } }, ['id', 'version', 'sha256']),
+];
 export function validateNativeArgs(name, args) {
   const schema = NATIVE_TOOLS.find(t => t.name === name)?.inputSchema;
   if (!schema) throw new Error('Unknown native command');
@@ -45,11 +52,40 @@ export function validateNativeArgs(name, args) {
 export class NativeTools {
   constructor(env = process.env) {
     this.env = env;
+    if (env.ZEN_RDP_PORT || env.ZEN_RDP_PROFILE) {
+      if (!env.ZEN_RDP_PORT || !env.ZEN_RDP_PROFILE) throw new Error('Set both ZEN_RDP_PORT and ZEN_RDP_PROFILE');
+      if (!/^\d+$/.test(env.ZEN_RDP_PORT)) throw new Error('Invalid RDP port');
+      this.rdp = new RdpClient({ port: Number(env.ZEN_RDP_PORT), profile: env.ZEN_RDP_PROFILE });
+    }
     if (env.ZEN_NATIVE_PORT || env.ZEN_NATIVE_PROFILE) {
       if (!env.ZEN_NATIVE_PORT || !env.ZEN_NATIVE_PROFILE) throw new Error('Set both ZEN_NATIVE_PORT and ZEN_NATIVE_PROFILE');
       if (!/^\d+$/.test(env.ZEN_NATIVE_PORT)) throw new Error('Invalid native port');
       this.client = new MarionetteClient({ port: Number(env.ZEN_NATIVE_PORT), profile: env.ZEN_NATIVE_PROFILE });
     }
+  }
+  async extension(name, args) {
+    const spec = RDP_TOOLS.find(t => t.name === name)?.inputSchema;
+    if (!spec) throw new Error('Unknown extension operation');
+    if (!args || typeof args !== 'object' || Array.isArray(args)) throw new Error('Arguments must be an object');
+    for (const key of spec.required) if (!Object.hasOwn(args, key)) throw new Error(`Missing argument: ${key}`);
+    for (const [key, value] of Object.entries(args)) {
+      const rule = spec.properties[key];
+      if (!rule || typeof value !== rule.type || (rule.minLength && value.length < rule.minLength) || (rule.maxLength && value.length > rule.maxLength) || (rule.pattern && !new RegExp(rule.pattern).test(value))) throw new Error(`Invalid argument: ${key}`);
+    }
+    if (args.id !== undefined && !/^[^\s/\\]+$/.test(args.id)) throw new Error('Invalid add-on ID');
+    if (!this.rdp) throw new Error('RDP extension tools disabled: configure ZEN_RDP_PORT and ZEN_RDP_PROFILE for a dedicated, explicitly authorized Zen profile');
+    await this.rdp.connect();
+    if (name === 'zen_extension_status') {
+      const result = await this.rdp.getAddon(args.id, undefined, undefined, false);
+      if (!result) throw new Error('Add-on is not installed');
+      return { id: result.id, version: result.version, sha256: result.sha256, active: result.active, permanent: result.permanent };
+    }
+    if (name === 'zen_extension_verify') {
+      const result = await this.rdp.getAddon(args.id, args.sha256, args.version);
+      if (!result) throw new Error('Add-on is not installed');
+      return result;
+    }
+    return this.rdp.installXpi(args);
   }
   async call(name, args) {
     validateNativeArgs(name, args);
@@ -63,5 +99,5 @@ export class NativeTools {
       return result.value.value;
     });
   }
-  async disconnect() { await this.client?.disconnect(); }
+  async disconnect() { await this.client?.disconnect(); await this.rdp?.disconnect(); }
 }

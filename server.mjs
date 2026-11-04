@@ -14,7 +14,7 @@ import {
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import WebSocket from 'ws';
-import { NATIVE_TOOLS, NativeTools } from './src/native-tools.mjs';
+import { NATIVE_TOOLS, RDP_TOOLS, NativeTools } from './src/native-tools.mjs';
 const native = new NativeTools();
 
 const PORT = parseInt(process.env.ZEN_DEBUG_PORT || '9222');
@@ -586,6 +586,11 @@ const TOOLS = [
 // ─── Tool Handlers ──────────────────────────────────────────────────
 
 async function handleTool(name, args) {
+  if (RDP_TOOLS.some(tool => tool.name === name)) {
+    await bidi.disconnect();
+    bidi.currentContext = null;
+    return text(JSON.stringify(await native.extension(name, args)));
+  }
   if (NATIVE_TOOLS.some(tool => tool.name === name)) {
     // Gecko permits only one WebDriver session across BiDi and Marionette.
     await bidi.disconnect();
@@ -1066,7 +1071,7 @@ const server = new Server(
   { capabilities: { tools: {} } }
 );
 
-server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [...TOOLS, ...NATIVE_TOOLS] }));
+server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [...TOOLS, ...NATIVE_TOOLS, ...RDP_TOOLS] }));
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
@@ -1077,7 +1082,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     return {
       content: [{
         type: 'text',
-        text: NATIVE_TOOLS.some(tool => tool.name === name) ? `Native error: ${error.message}` : `Error: ${error.message}\n\nMake sure Zen is running with:\n  /Applications/Zen.app/Contents/MacOS/zen --remote-debugging-port ${PORT}`,
+        text: NATIVE_TOOLS.some(tool => tool.name === name) || RDP_TOOLS.some(tool => tool.name === name) ? `Native error: ${error.message}` : `Error: ${error.message}\n\nMake sure Zen is running with:\n  /Applications/Zen.app/Contents/MacOS/zen --remote-debugging-port ${PORT}`,
       }],
       isError: true,
     };

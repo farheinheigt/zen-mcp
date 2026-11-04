@@ -10,8 +10,9 @@
   "scripts": {
     "start": "node server.mjs",
     "test": "node --test test/*.test.mjs",
-    "launch-zen": "open /Applications/Zen.app --args --remote-debugging-port 9222",
-    "test:integration": "node test/integration.mjs"
+    "launch-zen": "./launch-zen.sh",
+    "test:integration": "node test/integration.mjs",
+    "test:rdp-integration": "node test/rdp-integration.mjs"
   },
   "keywords": [
     "mcp",

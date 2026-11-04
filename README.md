@@ -2,7 +2,7 @@
 
 Control Zen Browser from an MCP client.
 
-Fork of [sh6drack/zen-mcp](https://github.com/sh6drack/zen-mcp), adding **21 native tools** alongside the original **20 web tools**.
+Fork of [sh6drack/zen-mcp](https://github.com/sh6drack/zen-mcp), keeping the original **20 web tools** and adding native organization tools plus guarded XPI management.
 
 ## What it does
 
@@ -11,6 +11,7 @@ Fork of [sh6drack/zen-mcp](https://github.com/sh6drack/zen-mcp), adding **21 nat
 - **Pinned tabs:** pin, unpin and move between spaces or folders.
 - **Splits:** create views with 2–4 tabs, change layout and separate them.
 - **Web pages:** read, navigate, click, fill forms and take screenshots.
+- **Extensions:** install/update and verify XPI files through Gecko RDP, with explicit profile, ID, version and SHA-256 checks.
 
 ## Install
 
@@ -28,7 +29,9 @@ For web tools, launch Zen with `--remote-debugging-port 9222`, then configure yo
 node /absolute/path/to/zen-mcp/server.mjs
 ```
 
-Native tools additionally require Marionette and an explicitly authorized profile. See [setup instructions](docs/native-setup.md).
+Organization tools additionally require Marionette and an explicitly authorized profile. XPI tools use a separate Gecko RDP endpoint and an explicitly authorized profile; a dedicated profile is recommended for testing unsigned packages. See [setup instructions](docs/native-setup.md).
+
+The XPI tool contract and profile checks are documented in [the RDP setup guide](docs/native-setup.md). The bridge verifies the XPI SHA-256 and manifest ID/version, then confirms the installed extension is active, permanent, and matches the expected hash. It never changes signature preferences or restarts Zen. Unsigned installation succeeds only when the profile's own Gecko policy permits it. The original web tools remain BiDi and organization tools remain Marionette; neither transport is enabled implicitly by XPI operations.
 
 ## Test safely
 

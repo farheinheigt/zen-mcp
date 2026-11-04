@@ -1,6 +1,6 @@
 # Native Zen setup
 
-This checkout adds **21 native MCP tools** alongside the original 20 page tools.
+This checkout keeps the original 20 web tools, adds 21 native organization tools, and adds three guarded XPI-management tools.
 It is a local development fork (`1.3.0-local.1`), not an official Zen or upstream
 release. It has not been registered in any personal MCP configuration.
 
@@ -61,6 +61,32 @@ No global npm installation or shell alias is needed. To use from an MCP client,
 configure its stdio command as `node` with this checkout's absolute `server.mjs`
 path and the three environment variables above. No such configuration is created
 by the tests.
+
+### XPI install/update over RDP
+
+`zen_extension_install`, `zen_extension_status`, and `zen_extension_verify` use Gecko's Remote Debugging Protocol only. They do not enable or use BiDi or Marionette for these operations. The XPI tools are disabled unless both `ZEN_RDP_PORT` and `ZEN_RDP_PROFILE` identify the same explicitly authorized profile. A dedicated profile is recommended for tests and unsigned packages. The MCP verifies the browser's real profile before performing any operation and rejects a WebDriver-controlled target.
+
+Create a dedicated test/development profile, configure its `user.js` with loopback-only RDP and the signature policy needed for the intended package, then launch it without stopping other Zen instances:
+
+```sh
+ZEN_RDP_PROFILE=/absolute/path/to/dedicated-profile ZEN_RDP_PORT=6000 npm run launch-zen
+```
+
+The launcher refuses a profile with a lock marker and refuses an occupied/uncheckable port. It does not quit or kill any Zen process. Configure the MCP server with the same values:
+
+```sh
+ZEN_RDP_PROFILE=/absolute/path/to/dedicated-profile \
+ZEN_RDP_PORT=6000 \
+node /absolute/path/to/zen-mcp/server.mjs
+```
+
+Call `zen_extension_status` first to read the current ID, version, SHA-256, active and permanent fields. Then call `zen_extension_install` with the local XPI path and expected `id`, `version`, and `sha256`; pass `force: true` only when the same artifact must be installed again. The tool checks artifact hash and manifest ID/version before handing it to Gecko, then verifies the installed file and AddonManager state. `zen_extension_verify` checks those expected values without installing. Gecko may reject an unsigned package unless the dedicated profile has the required policy configured; the MCP does not change signature preferences. None of these commands restarts Zen.
+
+Example MCP tool arguments (compute the XPI hash locally first):
+
+```json
+{"name":"zen_extension_install","arguments":{"path":"/absolute/path/Browser-Flow.xpi","id":"browserflow@example.invalid","version":"1.2.3","sha256":"<64-character-lowercase-sha256>"}}
+```
 
 ### Verification on a fresh isolated profile
 
